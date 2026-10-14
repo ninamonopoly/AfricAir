@@ -33,6 +33,14 @@ pnpm --version
 pnpm build
 pnpm add -D typescript
 
+git add ANSWERS.md
+git commit -m "Update ANSWERS.md"
+git push
+
+cd dist/ and ls
+cat vite.config.ts
+
+
 Why do the file names under dist/assets/ contain hashes? What would break if they didn't?
 The hashes (e.g. airports-BrwcO3ZA.js) are content fingerprints — Vite generates them from the file's contents at build time.
 
@@ -73,8 +81,44 @@ vite build → produces the deployable files
 If tsc -b fails, the && in the build script (tsc -b && vite build) stops the pipeline before Vite runs, so you never deploy type-unsafe code.
 
 Which one produces files in dist/?
-
-
 vite build
+
+Why --frozen-lockfile?
+
+-frozen-lockfile tells pnpm to install exactly what's in pnpm-lock.yaml and fail if anything would change it.
+
+Without it, pnpm might update the lockfile if package.json and pnpm-lock.yaml are out of sync — silently installing different dependency versions than what was tested.
+
+Why it matters in CI/CD:
+
+Guarantees every build uses the exact same dependency versions
+
+Fails fast if someone forgot to commit an updated lockfile
+
+Prevents "works on my machine" bugs caused by version drift
+
+Makes builds reproducible and auditable
+
+In local development you'd use plain pnpm install so the lockfile can update normally. In a pipeline, --frozen-lockfile is the safety net.
+
+
+
+Delete pnpm-lock.yaml, reinstall, and describe what changed and why that is dangerous in CI.
+
+The lockfile changed on one line — the TypeScript specifier updated from ^5.7.3 to ^5.9.3.
+
+What happened: deleting the lockfile forced pnpm to re-resolve all dependencies from scratch against the semver ranges in package.json. TypeScript's range is ^5.7.3 (any 5.x ≥ 5.7.3), so pnpm picked the latest available — 5.9.3.
+
+Why this is dangerous in CI:
+
+A CI pipeline running pnpm install (without --frozen-lockfile) after someone accidentally deletes or forgets to commit the lockfile would silently pull 5.9.3 instead of 5.7.3
+
+TypeScript minor/patch releases can introduce new type errors or change behaviour, breaking a build that previously passed
+
+The build artifact produced is no longer identical to what was tested locally or in a previous run — reproducibility is gone
+
+You'd have no easy way to know why the build suddenly broke, since no code changed
+
+This is exactly why CI should always use pnpm install --frozen-lockfile — it would have caught this immediately with a hard failure instead of silently upgrading.
 
 
