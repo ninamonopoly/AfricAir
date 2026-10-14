@@ -121,4 +121,56 @@ You'd have no easy way to know why the build suddenly broke, since no code chang
 
 This is exactly why CI should always use pnpm install --frozen-lockfile — it would have caught this immediately with a hard failure instead of silently upgrading.
 
+Commands run:
+git add ANSWERS.md
+git commit -m "Update ANSWERS.md"
+git push
+
+cat vite.config.ts /vi vite.config.ts escape :q! without saving
+
+
+What do manualChunks and chunkSizeWarningLimit do? Which chunk is the largest, and why does that matter to a user on a 3G connection?
+
+manualChunks
+
+Overrides Rollup's default bundling by explicitly assigning modules to named chunks. In vite.config.ts:
+
+jspdf, html2canvas, dompurify → pdf chunk
+
+airports.json → airports chunk
+
+react → react chunk
+
+everything else → index chunk
+
+Without this, Rollup might bundle everything into one giant file, or split it unpredictably.
+
+chunkSizeWarningLimit
+
+Just raises the threshold (from Vite's default 500 kB to 700 kB) at which Vite prints a warning about large chunks. It doesn't change the output — it silences the warning for pdf which is ~585 kB.
+
+Which chunk is largest
+
+pdf-o1MWN_TF.js — jsPDF alone is ~585 kB minified (noted in the config comment).
+
+Why that matters on 3G
+
+A typical 3G connection is ~1–2 Mbps. At 1 Mbps, 585 kB takes roughly 4–5 seconds to download just that one chunk. But the key insight is that manualChunks actually helps here:
+
+The PDF chunk is only needed when a user downloads an itinerary — it can be lazy-loaded at that point rather than blocking the initial page load
+
+airports and react are stable and rarely change, so they stay cached across deploys — a returning user on 3G doesn't re-download them
+
+Only index (the app logic) needs to be fetched fresh after each deployment
+
+Without manual chunking, every deploy would force a 3G user to re-download jsPDF even if they never use the PDF feature.
+
+Commands contd.
+du -sh dist/
+1.4M
+
+tar czf - dist | wc -c
+450738
+
+
 
