@@ -2,10 +2,12 @@
 set -uo pipefail
 
 # Exit codes:
-#   10  git checkout failure
-#   20  pnpm install failure
-#   30  test failure
-#   40  build failure
+#   10  artifact not found or checksum verification failed
+#   20  failed to extract artifact
+#   30  failed to create release directory
+#   40  failed to update current symlink
+#   50  nginx config invalid
+#   60  smoke test failed (rolled back)
 
 usage() {
   cat <<EOF
@@ -22,6 +24,7 @@ Exit codes:
   30  failed to create release directory
   40  failed to update current symlink
   50  nginx config invalid
+  60  smoke test failed (rolled back)
 
 Examples:
   $0 africair-abc1234.tar.gz
@@ -38,6 +41,9 @@ fi
 ARTIFACT="${1:?$(usage)}"
 DEPLOY_DIR="/opt/africair"
 RELEASES_DIR="$DEPLOY_DIR/releases"
+APP_PORT="${APP_PORT:-80}"
+APP_HOST="${APP_HOST:-localhost}"
+BASE_URL="http://${APP_HOST}:${APP_PORT}"
 
 # Verify artifact and checksum file both exist
 [[ -f "$ARTIFACT" ]] || { echo "ERROR: artifact not found: $ARTIFACT"; exit 10; }
@@ -58,6 +64,20 @@ sudo tar xzf "$ARTIFACT" -C "$RELEASE_DIR" --strip-components=1 || exit 20
 # Set ownership
 sudo chown -R africair:africair "$RELEASE_DIR"
 
+# Capture previous release for rollback
+PREV_RELEASE=$(readlink -f "$DEPLOY_DIR/current" 2>/dev/null || true)
+
+rollback() {
+  echo "ERROR: $1 — rolling back to ${PREV_RELEASE:-none}"
+  if [[ -n "$PREV_RELEASE" ]]; then
+    sudo ln -sfn "$PREV_RELEASE" "$DEPLOY_DIR/current.new"
+    sudo mv -T "$DEPLOY_DIR/current.new" "$DEPLOY_DIR/current"
+    sudo nginx -t && sudo systemctl reload nginx
+    echo "Rolled back to $PREV_RELEASE"
+  fi
+  exit 60
+}
+
 # Update current symlink atomically using ln + mv -T
 # ln -sfn alone is not atomic: it unlinks then relinks, leaving a window
 # where current does not exist. mv -T replaces the symlink in one syscall.
@@ -68,5 +88,16 @@ sudo mv -T "$DEPLOY_DIR/current.new" "$DEPLOY_DIR/current" || exit 40
 sudo nginx -t || { echo "ERROR: nginx config invalid, skipping reload"; exit 50; }
 sudo systemctl reload nginx
 
+# Smoke tests: /healthz must return 200; /version.json commit must match artifact SHA
+sleep 2
+
+curl -sf "${BASE_URL}/healthz" > /dev/null \
+  || rollback "/healthz did not return 200"
+
+DEPLOYED_COMMIT=$(curl -sf "${BASE_URL}/version.json" | jq -r '.commit // empty')
+[[ "$DEPLOYED_COMMIT" == "$SHA"* || "$SHA" == "${DEPLOYED_COMMIT:0:${#SHA}}" ]] \
+  || rollback "/version.json commit mismatch: got '${DEPLOYED_COMMIT}', expected '${SHA}'"
+
 echo "Deployed to $RELEASE_DIR"
 echo "current -> $RELEASE_DIR"
+echo "commit:  $DEPLOYED_COMMIT"
