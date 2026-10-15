@@ -174,3 +174,58 @@ tar czf - dist | wc -c
 
 
 
+## Linux Server Setup
+
+### Security group SSH rule
+```bash
+aws ec2 authorize-security-group-ingress \
+  --region us-east-1 \
+  --group-id sg-0beb4ceac7618ddb0 \
+  --ip-permissions IpProtocol=tcp,FromPort=22,ToPort=22,PrefixListIds='[{PrefixListId=pl-0e4bcff02b13bef1e}]'
+```
+Allows inbound SSH only from the EC2 Instance Connect IP ranges for us-east-1 via a managed prefix list. AWS keeps the list current automatically — no manual rule updates needed.
+
+### Packages installed
+```bash
+sudo apt update
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs nginx git ufw jq curl
+sudo corepack enable
+```
+
+### System user
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin africair
+```
+A system user with no login shell so the app process cannot be used to log in interactively.
+
+### Directory layout
+```bash
+sudo mkdir -p /opt/africair/releases /opt/africair/shared
+sudo ln -s /opt/africair/releases /opt/africair/current
+sudo chown -R africair:africair /opt/africair
+```
+```
+/opt/africair/
+  releases/   # one directory per deployed build
+  shared/     # anything that survives releases (logs, config)
+  current ->  releases/<id>
+```
+
+### UFW firewall
+```bash
+sudo ufw allow OpenSSH
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw --force enable
+```
+UFW (Uncomplicated Firewall) is an iptables frontend. It acts as an OS-level firewall on the server itself, complementing the AWS Security Group (cloud-level). Both must allow traffic for a connection to succeed.
+
+### Idempotent setup script
+The full setup is in `scripts/setup-server.sh`. A second run changes nothing and exits 0 because:
+- `apt-get install -y` skips already-installed packages
+- `command -v node` guards the NodeSource install
+- `id africair` guards the useradd
+- `[ ! -L /opt/africair/current ]` guards the symlink creation
+- `ufw allow` on an existing rule is a no-op
+- `ufw --force enable` on an already-enabled firewall is a no-op
