@@ -271,3 +271,44 @@ The full setup is in `scripts/setup-server.sh`. A second run changes nothing and
 - `[ ! -L /opt/africair/current ]` guards the symlink creation
 - `ufw allow` on an existing rule is a no-op
 - `ufw --force enable` on an already-enabled firewall is a no-op
+
+## nginx (`deploy/nginx/africair.conf`)
+
+### Cache-Control strategy
+- `/assets/*` — `Cache-Control: public, max-age=31536000, immutable`. Vite's content-hashed filenames mean these files never change; browsers and CDNs can cache them forever.
+- `/index.html` and `/version.json` — `Cache-Control: no-cache`. The browser revalidates on every request but can still serve from cache on a 304. `index.html` must always be fresh so the browser loads the correct hashed asset filenames after a deploy. `version.json` is smoke-tested on every deploy so it must never be stale.
+
+### /healthz
+Served inline by nginx (`return 200 "ok\n"`), never proxied to Node. `access_log off` keeps load-balancer and smoke-test probes out of the access log.
+
+### Security headers
+- `X-Content-Type-Options: nosniff` — prevents browsers from MIME-sniffing a response away from the declared content type.
+- `X-Frame-Options: SAMEORIGIN` — blocks the page being embedded in a frame on another origin (clickjacking).
+- `Referrer-Policy: strict-origin-when-cross-origin` — sends the full URL as referrer on same-origin requests, only the origin on cross-origin, nothing on downgrade to HTTP.
+- `Content-Security-Policy` — restricts what the browser may load:
+  - `default-src 'self'` — catch-all; blocks everything not explicitly listed.
+  - `script-src 'self'` — all JS is self-hosted hashed assets; no inline scripts or CDN.
+  - `style-src 'self' https://fonts.googleapis.com` — the CSS `@import` in `styles.css` fetches the Google Fonts stylesheet from `fonts.googleapis.com`.
+  - `font-src 'self' https://fonts.gstatic.com` — the actual `.woff2` font files are served from `fonts.gstatic.com`.
+  - `img-src 'self' data:` — SVG mark is self-hosted; `data:` covers any base64-encoded images.
+  - `connect-src 'self'` — all API calls go to `/api/` on the same origin.
+  - `frame-ancestors 'none'` — blocks framing entirely (supersedes `X-Frame-Options` in modern browsers).
+
+### Gzip
+Enabled for `text/css`, `application/javascript`, `application/json`, and `image/svg+xml` with a 1 KB minimum. nginx always compresses `text/html` by default.
+
+### JSON access log
+`log_format africair_json escape=json` writes one JSON object per line to `/var/log/nginx/africair.access.json`. `escape=json` (nginx ≥ 1.11.8) automatically escapes special characters so the output is always valid JSON. Consumable directly with `jq`, CloudWatch Logs, or Loki.
+
+### ops/deploy.sh additions
+- **Smoke tests**: after `systemctl reload nginx`, the script curls `/healthz` (must return 200) and `/version.json` (commit field must match the artifact SHA).
+- **Auto-rollback**: if either check fails, the previous release symlink is restored atomically and nginx is reloaded; the script exits 60.
+- **Release pruning**: after a successful deploy, `ls -1dt releases/*/` sorted newest-first; `tail -n +6` yields everything beyond the 5 most recent; each is `rm -rf`'d unless it is the current live release.
+
+### logrotate (`deploy/logrotate/africair`)
+Install: `sudo cp deploy/logrotate/africair /etc/logrotate.d/africair`
+- `daily` / `rotate 14` — keeps 14 days of logs.
+- `compress` / `delaycompress` — gzips rotated files; `delaycompress` leaves the most recently rotated file uncompressed for one day so it can be read immediately after rotation.
+- `missingok` — no error if the log file doesn't exist yet.
+- `notifempty` — skips rotation on an empty file.
+- `postrotate: nginx -s reopen` — tells nginx to close the old file handle and open a fresh one at the same path; without this nginx would keep writing to the renamed rotated file.
