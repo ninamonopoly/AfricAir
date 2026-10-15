@@ -98,6 +98,16 @@ DEPLOYED_COMMIT=$(curl -sf "${BASE_URL}/version.json" | jq -r '.commit // empty'
 [[ "$DEPLOYED_COMMIT" == "$SHA"* || "$SHA" == "${DEPLOYED_COMMIT:0:${#SHA}}" ]] \
   || rollback "/version.json commit mismatch: got '${DEPLOYED_COMMIT}', expected '${SHA}'"
 
+# Prune: keep only the 5 most recent releases (never remove current)
+CURRENT_RELEASE=$(readlink -f "$DEPLOY_DIR/current")
+ls -1dt "$RELEASES_DIR"/*/  | tail -n +6 | while read -r old; do
+  old="${old%/}"
+  if [[ "$old" != "$CURRENT_RELEASE" ]]; then
+    sudo rm -rf "$old"
+    echo "Pruned: $old"
+  fi
+done
+
 echo "Deployed to $RELEASE_DIR"
 echo "current -> $RELEASE_DIR"
 echo "commit:  $DEPLOYED_COMMIT"
