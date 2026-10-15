@@ -1,0 +1,15 @@
+# /etc/logrotate.d/africair
+# Install: sudo cp deploy/logrotate/africair /etc/logrotate.d/africair
+
+/var/log/nginx/africair.access.json {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    sharedscripts
+    postrotate
+        nginx -s reopen
+    endscript
+}
