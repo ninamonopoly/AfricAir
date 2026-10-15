@@ -21,6 +21,7 @@ Exit codes:
   20  failed to extract artifact
   30  failed to create release directory
   40  failed to update current symlink
+  50  nginx config invalid
 
 Examples:
   $0 africair-abc1234.tar.gz
@@ -57,8 +58,15 @@ sudo tar xzf "$ARTIFACT" -C "$RELEASE_DIR" --strip-components=1 || exit 20
 # Set ownership
 sudo chown -R africair:africair "$RELEASE_DIR"
 
-# Update current symlink atomically
-sudo ln -sfn "$RELEASE_DIR" "$DEPLOY_DIR/current" || exit 40
+# Update current symlink atomically using ln + mv -T
+# ln -sfn alone is not atomic: it unlinks then relinks, leaving a window
+# where current does not exist. mv -T replaces the symlink in one syscall.
+sudo ln -sfn "$RELEASE_DIR" "$DEPLOY_DIR/current.new" || exit 40
+sudo mv -T "$DEPLOY_DIR/current.new" "$DEPLOY_DIR/current" || exit 40
+
+# Validate nginx config before reloading — never restart (restart drops connections)
+sudo nginx -t || { echo "ERROR: nginx config invalid, skipping reload"; exit 50; }
+sudo systemctl reload nginx
 
 echo "Deployed to $RELEASE_DIR"
 echo "current -> $RELEASE_DIR"

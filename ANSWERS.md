@@ -172,6 +172,66 @@ du -sh dist/
 tar czf - dist | wc -c
 450738
 
+# Update package list
+sudo apt update
+
+# Install nginx, git, ufw, jq, curl
+sudo apt install -y nginx git ufw jq curl
+
+# Install Node.js LTS (v22) via NodeSource
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt install -y nodejs
+
+# Enable corepack (comes with Node.js 22)
+sudo corepack enable
+
+# Verify installations
+node -v
+npm -v
+pnpm --version
+nginx -v
+git --version
+ufw --version
+jq --version
+curl --version
+
+create a system user africair with no login shell;
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin africair
+
+id africair
+uid=999(africair) gid=988(africair) groups=988(africair)
+
+sudo mkdir -p /opt/africair/releases /opt/africair/shared
+sudo ln -s /opt/africair/releases /opt/africair/current
+sudo chown -R africair:africair /opt/africair
+
+sudo ufw allow OpenSSH
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw enable
+
+test : sudo ufw status
+
+# Upload
+scp -i africair.pem scripts/setup-server.sh ubuntu@54.83.191.64:~/
+
+# Make executable
+ssh -i africair.pem ubuntu@54.83.191.64 "chmod +x setup-server.sh"
+
+# First run
+ssh -i africair.pem ubuntu@54.83.191.64 "./setup-server.sh"
+
+# Second run (must change nothing, exit 0)
+ssh -i africair.pem ubuntu@54.83.191.64 "./setup-server.sh"
+
+pnpm install --frozen-lockfile
+ubuntu@ip-172-31-0-48:~$ pnpm install --frozen-lockfile
+Already up to date
+Done in 194ms using pnpm v12.11.2
+
+Error: ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL
+
+  × Command "check" not found
 
 
 ## Linux Server Setup
@@ -185,41 +245,23 @@ aws ec2 authorize-security-group-ingress \
 ```
 Allows inbound SSH only from the EC2 Instance Connect IP ranges for us-east-1 via a managed prefix list. AWS keeps the list current automatically — no manual rule updates needed.
 
-### Packages installed
-```bash
-sudo apt update
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-sudo apt-get install -y nodejs nginx git ufw jq curl
-sudo corepack enable
-```
-
-### System user
-```bash
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin africair
-```
-A system user with no login shell so the app process cannot be used to log in interactively.
-
-### Directory layout
-```bash
-sudo mkdir -p /opt/africair/releases /opt/africair/shared
-sudo ln -s /opt/africair/releases /opt/africair/current
-sudo chown -R africair:africair /opt/africair
-```
-```
-/opt/africair/
-  releases/   # one directory per deployed build
-  shared/     # anything that survives releases (logs, config)
-  current ->  releases/<id>
-```
-
-### UFW firewall
-```bash
-sudo ufw allow OpenSSH
-sudo ufw allow 80/tcp
-sudo ufw allow 443/tcp
-sudo ufw --force enable
-```
+### UFW
 UFW (Uncomplicated Firewall) is an iptables frontend. It acts as an OS-level firewall on the server itself, complementing the AWS Security Group (cloud-level). Both must allow traffic for a connection to succeed.
+
+### Why plain ln -sfn is not atomic
+
+`ln -sfn` is implemented as two separate syscalls:
+1. `unlink(current)` — removes the existing symlink
+2. `symlink(new-target, current)` — creates the new one
+
+Between those two syscalls there is a window where `current` does not exist. If nginx resolves the symlink at that exact moment (e.g. during a reload), it gets a "no such file" error and serves a 502 to users.
+
+The atomic alternative:
+```bash
+ln -sfn /opt/africair/releases/20250714T102530Z-abc1234 /opt/africair/current.new
+mv -T /opt/africair/current.new /opt/africair/current
+```
+`mv -T` calls the `rename()` syscall, which the Linux kernel guarantees is atomic — `current` always points to either the old or the new release, never nothing. No 502 window.
 
 ### Idempotent setup script
 The full setup is in `scripts/setup-server.sh`. A second run changes nothing and exits 0 because:
