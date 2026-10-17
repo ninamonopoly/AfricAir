@@ -11,12 +11,14 @@ set -uo pipefail
 
 usage() {
   cat <<EOF
-Usage: $0 <artifact.tar.gz>
+Usage: $0 <artifact.tar.gz> [api-artifact.tar.gz]
 
 Deploy a pre-built AfricAir artifact to /opt/africair.
+Optionally deploy the API artifact to /opt/africair/api.
 
 Arguments:
-  <artifact.tar.gz>   Path to the build tarball (e.g. africair-abc1234.tar.gz)
+  <artifact.tar.gz>       Path to the frontend tarball (e.g. africair-abc1234.tar.gz)
+  [api-artifact.tar.gz]  Path to the API tarball (e.g. africair-api-abc1234.tar.gz)
 
 Exit codes:
   10  artifact not found or checksum verification failed
@@ -27,8 +29,7 @@ Exit codes:
   60  smoke test failed (rolled back)
 
 Examples:
-  $0 africair-abc1234.tar.gz
-  $0 /tmp/africair-build-XXXXXX/africair-abc1234.tar.gz
+  $0 africair-abc1234.tar.gz africair-api-abc1234.tar.gz
 
 Repository: https://github.com/ninamonopoly/africair
 EOF
@@ -39,8 +40,10 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
 fi
 
 ARTIFACT="${1:?$(usage)}"
+API_ARTIFACT="${2:-}"
 DEPLOY_DIR="/opt/africair"
 RELEASES_DIR="$DEPLOY_DIR/releases"
+API_RELEASES_DIR="$DEPLOY_DIR/api/releases"
 APP_PORT="${APP_PORT:-80}"
 APP_HOST="${APP_HOST:-localhost}"
 BASE_URL="http://${APP_HOST}:${APP_PORT}"
@@ -64,6 +67,27 @@ sudo tar xzf "$ARTIFACT" -C "$RELEASE_DIR" --strip-components=1 || exit 20
 # Set ownership
 sudo chown -R africair:africair "$RELEASE_DIR"
 
+# --- API artifact (optional) ---
+if [[ -n "$API_ARTIFACT" ]]; then
+  [[ -f "$API_ARTIFACT" ]] || { echo "ERROR: API artifact not found: $API_ARTIFACT"; exit 10; }
+  [[ -f "${API_ARTIFACT}.sha256" ]] || { echo "ERROR: API checksum not found: ${API_ARTIFACT}.sha256"; exit 10; }
+  sha256sum --check "${API_ARTIFACT}.sha256" || { echo "ERROR: API checksum verification failed"; exit 10; }
+
+  API_RELEASE_DIR="$API_RELEASES_DIR/${TIMESTAMP}-${SHA}"
+  sudo mkdir -p "$API_RELEASE_DIR" || exit 30
+  sudo tar xzf "$API_ARTIFACT" -C "$API_RELEASE_DIR" || exit 20
+  sudo chown -R africair:africair "$API_RELEASE_DIR"
+
+  PREV_API_RELEASE=$(readlink -f "$DEPLOY_DIR/api/current" 2>/dev/null || true)
+
+  sudo ln -sfn "$API_RELEASE_DIR" "$DEPLOY_DIR/api/current.new" || exit 40
+  sudo mv -T "$DEPLOY_DIR/api/current.new" "$DEPLOY_DIR/api/current" || exit 40
+
+  # Restart the API service to pick up the new release
+  sudo systemctl restart africair-api || true
+  echo "API deployed to $API_RELEASE_DIR"
+fi
+
 # Capture previous release for rollback
 PREV_RELEASE=$(readlink -f "$DEPLOY_DIR/current" 2>/dev/null || true)
 
@@ -73,7 +97,13 @@ rollback() {
     sudo ln -sfn "$PREV_RELEASE" "$DEPLOY_DIR/current.new"
     sudo mv -T "$DEPLOY_DIR/current.new" "$DEPLOY_DIR/current"
     sudo nginx -t && sudo systemctl reload nginx
-    echo "Rolled back to $PREV_RELEASE"
+    echo "Rolled back frontend to $PREV_RELEASE"
+  fi
+  if [[ -n "${PREV_API_RELEASE:-}" ]]; then
+    sudo ln -sfn "$PREV_API_RELEASE" "$DEPLOY_DIR/api/current.new"
+    sudo mv -T "$DEPLOY_DIR/api/current.new" "$DEPLOY_DIR/api/current"
+    sudo systemctl restart africair-api || true
+    echo "Rolled back API to $PREV_API_RELEASE"
   fi
   exit 60
 }
@@ -94,6 +124,12 @@ sleep 2
 curl -sf "${BASE_URL}/healthz" > /dev/null \
   || rollback "/healthz did not return 200"
 
+# API smoke test (only if API was deployed)
+if [[ -n "$API_ARTIFACT" ]]; then
+  curl -sf "${BASE_URL}/api/healthz" > /dev/null \
+    || rollback "/api/healthz did not return 200"
+fi
+
 DEPLOYED_COMMIT=$(curl -sf "${BASE_URL}/version.json" | jq -r '.commit // empty')
 [[ "$DEPLOYED_COMMIT" == "$SHA"* || "$SHA" == "${DEPLOYED_COMMIT:0:${#SHA}}" ]] \
   || rollback "/version.json commit mismatch: got '${DEPLOYED_COMMIT}', expected '${SHA}'"
@@ -104,9 +140,21 @@ ls -1dt "$RELEASES_DIR"/*/  | tail -n +6 | while read -r old; do
   old="${old%/}"
   if [[ "$old" != "$CURRENT_RELEASE" ]]; then
     sudo rm -rf "$old"
-    echo "Pruned: $old"
+    echo "Pruned frontend: $old"
   fi
 done
+
+# Prune API releases
+if [[ -n "$API_ARTIFACT" ]]; then
+  CURRENT_API_RELEASE=$(readlink -f "$DEPLOY_DIR/api/current")
+  ls -1dt "$API_RELEASES_DIR"/*/  | tail -n +6 | while read -r old; do
+    old="${old%/}"
+    if [[ "$old" != "$CURRENT_API_RELEASE" ]]; then
+      sudo rm -rf "$old"
+      echo "Pruned API: $old"
+    fi
+  done
+fi
 
 echo "Deployed to $RELEASE_DIR"
 echo "current -> $RELEASE_DIR"
