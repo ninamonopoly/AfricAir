@@ -7,4 +7,4 @@ After=network.target
 Type=oneshot
 ExecStart=/opt/africair/scripts/ops/healthcheck.sh
 Environment=BASE_URL=http://localhost
-User=nobody
+User=root
