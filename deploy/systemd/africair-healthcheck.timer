@@ -1,0 +1,16 @@
+# /etc/systemd/system/africair-healthcheck.timer
+# Install:
+#   sudo cp deploy/systemd/africair-healthcheck.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now africair-healthcheck.timer
+
+[Unit]
+Description=Run AfricAir health check every minute
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=1min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

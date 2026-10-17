@@ -1,0 +1,17 @@
+# /etc/systemd/system/africair-healthcheck.service
+# Install:
+#   sudo cp deploy/systemd/africair-healthcheck.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+
+[Unit]
+Description=AfricAir health check
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/africair/scripts/ops/healthcheck.sh
+Environment=BASE_URL=http://localhost
+User=nobody
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=africair-healthcheck
