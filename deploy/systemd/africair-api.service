@@ -1,0 +1,23 @@
+# /etc/systemd/system/africair-api.service
+[Unit]
+Description=AfricAir API
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=africair
+WorkingDirectory=/opt/africair/api/current
+ExecStart=/usr/bin/node server/dist/index.js
+Restart=on-failure
+RestartSec=5s
+
+# Load runtime config and secrets from /etc/africair/env
+EnvironmentFile=-/etc/africair/env
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=africair-api
+
+[Install]
+WantedBy=multi-user.target

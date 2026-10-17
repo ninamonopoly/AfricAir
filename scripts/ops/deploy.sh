@@ -84,7 +84,8 @@ if [[ -n "$API_ARTIFACT" ]]; then
   sudo mv -T "$DEPLOY_DIR/api/current.new" "$DEPLOY_DIR/api/current" || exit 40
 
   # Restart the API service to pick up the new release
-  sudo systemctl restart africair-api || true
+  sudo systemctl restart africair-api \
+    || { echo "ERROR: africair-api.service failed to start — is it installed?"; exit 30; }
   echo "API deployed to $API_RELEASE_DIR"
 fi
 
