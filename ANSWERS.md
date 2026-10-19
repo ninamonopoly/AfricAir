@@ -282,3 +282,246 @@ sudo cp deploy/logrotate/africair /etc/logrotate.d/africair
 sudo logrotate --debug /etc/logrotate.d/africair   # dry-run to verify
 
 
+Healthcheck Script : Created scripts/ops/healthcheck.sh checking /healthz, /api/healthz, /version.json. Logs via logger -t africair-health. Tracks consecutive failures in /var/lib/africair/healthcheck.failures, reloads nginx after 3 failures with WARNING log entry
+
+Systemd Service/Timer : africair-healthcheck.service (Type=oneshot, User=root) + africair-healthcheck.timer (every 1 min, OnBootSec=30, AccuracySec=5s). Service runs as root to allow systemctl reload nginx and write to /var/lib/africair/
+
+report.sh : Created scripts/ops/report.sh — reads JSON nginx access log, prints top 10 IPs, status class breakdown, top 10 paths, requests per minute for last hour. Uses only jq, awk, sort, uniq
+
+API Packaging : Extended scripts/deploy.sh to run pnpm build:api and package server/dist + server/migrations + prod-only node_modules as africair-api-<sha>.tar.gz. Extended scripts/ops/deploy.sh to accept optional second API artifact, deploy to /opt/africair/api/releases/<timestamp>-<sha>/, atomic symlink at /opt/africair/api/current, restart africair-api service, smoke test /api/healthz, rollback both frontend and API, prune to 5 releases
+
+africair-api.service : Created systemd service unit for Node API. Had to manually paste it to server because git auth was failing. Service installed and enabled but not yet started
+
+Git Auth Issue : GitHub rejected password auth on server. Fix is to use Personal Access Token in remote URL: https://<token>@github.com/ninamonopoly/AfricAir.git
+
+Deploy Attempts : Build ran on server with pnpm install --no-frozen-lockfile (lockfile mismatch on typescript version). Tarballs created manually. Deploy rolled back because africair-api.service didn't exist yet. Service now installed, waiting to confirm git pull and start API
+
+Files and Code Summary
+scripts/deploy.sh: Clones repo, installs, tests, builds frontend + API, writes dist/version.json, packages africair-<sha>.tar.gz (frontend) and africair-api-<sha>.tar.gz (API with prod-only deps staged in temp dir)
+
+scripts/ops/deploy.sh: Accepts <artifact> [api-artifact]. Checksums, extracts to timestamped release dirs, atomic symlink swap ( ln -sfn + mv -T), restarts africair-api, nginx reload, smoke tests, rollback both artifacts, prunes to 5 releases. Exit codes 10/20/30/40/50/60
+
+scripts/ops/healthcheck.sh: Uses logger -t africair-health, tracks failures in /var/lib/africair/healthcheck.failures, reloads nginx at threshold 3, resets counter on success
+
+scripts/ops/report.sh: Reads logfile arg (default /var/log/nginx/africair.access.json), four sections: top 10 IPs, status classes, top 10 paths (query strings stripped), req/min last 60 min
+
+deploy/systemd/africair-api.service: Type=simple, User=africair, WorkingDirectory=/opt/africair/api/current, ExecStart=/usr/bin/node server/dist/index.js, EnvironmentFile=-/etc/africair/env, Restart=on-failure
+
+deploy/systemd/africair-healthcheck.service: Type=oneshot, User=root, no SyslogIdentifier (logger handles journald directly)
+
+deploy/systemd/africair-healthcheck.timer: OnBootSec=30, OnUnitActiveSec=1min, AccuracySec=5s
+
+deploy/nginx/africair.conf: JSON access log, gzip, security headers, CSP (single line), immutable cache for /assets/, /healthz inline return 200, /api/ proxy to 127.0.0.1:4000, SPA fallback
+
+server/src/migrate.ts: Reads migrations from server/migrations/*.sql, uses advisory lock, tracks applied versions in schema_migrations table, CLI entrypoint via DATABASE_URL env var
+
+server/.env.example: Documents all env vars — PORT=4000, DATABASE_URL, ADMIN_TOKEN, PROMO_CODES, MIGRATE_ON_START, etc.
+
+Key Insights
+EC2 : Instance i-038eff2e88278998a, IP 54.83.191.64, user ubuntu, project at ~/AfricAir
+
+GitHub : https://github.com/ninamonopoly/AfricAir, branch main, latest pushed commit 6164a8a
+
+Git auth broken on server : Password auth rejected by GitHub. Must use PAT: git remote set-url origin https://<token>@github.com/ninamonopoly/AfricAir.git
+
+pnpm lockfile mismatch : typescript version mismatch ( ^5.9.3 vs ^5.7.3). Workaround: pnpm install --no-frozen-lockfile on server. Proper fix: run pnpm install locally and push updated pnpm-lock.yaml
+
+africair-api.service : Manually pasted to /etc/systemd/system/africair-api.service, daemon-reloaded, enabled. Status: inactive (dead) — not yet started
+
+DB : PostgreSQL installed, role africair_app, database africair. Config at /etc/africair/env (chmod 600)
+
+Deploy layout : Frontend → /opt/africair/releases/, symlink /opt/africair/current. API → /opt/africair/api/releases/, symlink /opt/africair/api/current
+
+nginx : Running, serving /healthz correctly (returns ok). /version.json returns 404 (frontend not deployed to current). /api/healthz returns 502 (no Node process on port 4000)
+
+Most Recent Topic
+Topic : Confirming git is updated on the server to commit 6164a8a
+
+Progress : Git pull was failing due to GitHub password auth rejection. Instructed user to generate a PAT and update remote URL. Asked user to run git -C ~/AfricAir log --oneline -3 to confirm 6164a8a is the top commit. Awaiting output.
+
+Next steps after git confirmed :
+
+Start the API: sudo systemctl start africair-api && sudo systemctl status africair-api
+
+Check API release exists: ls /opt/africair/api/current/
+
+Redeploy if needed with both artifacts
+
+Verify: curl -s http://localhost/healthz, curl -s http://localhost/version.json, curl -s http://localhost/api/healthz
+
+Tools Used :
+
+fsWrite deploy/systemd/africair-api.service: Created systemd unit for Node API
+
+fsReplace scripts/ops/deploy.sh: Changed || true to hard fail with clear error message when africair-api.service not found
+
+executeBash git commit+push : Pushed 6164a8a with africair-api.service and deploy fix
+
+Manual tee on server : Pasted africair-api.service content directly since git pull was failing; service enabled successfully
+
+
+ls: cannot open directory '/opt/africair/api/current/': Permission denied
+● africair-api.service - AfricAir API
+     Loaded: loaded (/etc/systemd/system/africair-api.service; enabled; preset: enabled)
+     Active: active (running) since Sat 2026-10-17 04:53:10 UTC; 26ms ago
+   Main PID: 65544 (node)
+      Tasks: 6 (limit: 2209)
+     Memory: 2.3M (peak: 2.3M)
+        CPU: 16ms
+     CGroup: /system.slice/africair-api.service
+             └─65544 /usr/bin/node server/dist/index.js
+
+Oct 17 04:53:10 ip-172-31-0-48 systemd[1]: Started africair-api.service - AfricAir API.
+ubuntu@ip-172-31-0-48:~/AfricAir$ 
+
+sudo apt docker install
+ added docker user
+  then ran the build.
+
+  scripts/deploy.sh: Builds frontend + API, stages prod deps, creates africair-<sha>.tar.gz and africair-api-<sha>.tar.gz with checksums. Already complete.
+
+scripts/ops/deploy.sh: Deploys both artifacts, atomic symlinks, restarts africair-api, smoke tests, rollback, prunes to 5 releases. Already complete.
+
+deploy/systemd/africair-api.service: Added EnvironmentFile=-/etc/africair/api.env before EnvironmentFile=-/etc/africair/env.
+
+scripts/setup-server.sh: Added block to create /etc/africair/api.env with 6 non-secret vars, root:africair 0640, guarded by [[ ! -f ]].
+
+config/staging.env: Non-secret settings: APP_ENV=staging, APP_VERSION=1.0.0, BRAND_NAME=AfricAir Staging, ANNOUNCEMENT_TEXT, ANNOUNCEMENT_LEVEL=warning, SERVICE_FEE_USD=5, DEFAULT_CURRENCY=NGN.
+
+secrets.example/db_password: change-me-db-password
+
+secrets.example/admin_token: change-me-admin-token
+
+secrets.example/promo_codes: SAVE10:10,AFRICA20:20
+
+docker-compose.yml: Added api service (builds from server/Dockerfile, env_file: config/staging.env, PG* vars, *_FILE secret vars, ports 4000). Updated db to use POSTGRES_PASSWORD_FILE. Updated frontend to build from root Dockerfile, depend on api. Added top-level secrets: block pointing to ./secrets/*.
+
+Dockerfile (root): Multi-stage AfricAir frontend. Build: node:22-alpine, pnpm install --frozen-lockfile, pnpm build. Runtime: nginx:alpine, copies dist/ and deploy/nginx/docker.conf.
+
+deploy/nginx/docker.conf: Docker-specific nginx config. Proxies /api/ to http://api:4000, SPA fallback, assets cache, /healthz inline 200.
+
+server/Dockerfile: Multi-stage. Build: copies root package.json, pnpm-lock.yaml, pnpm-workspace.yaml, installs all deps, builds API. Runtime: copies server/dist, server/migrations, node_modules from build stage. CMD: node server/dist/index.js.
+
+.gitignore: Added config/*.secret.env, config/.env, secrets/.
+
+server/.env.example: Documents all env vars including *_FILE secret variants.
+
+Key Insights
+Server : EC2 instance i-038eff2e88278998a, IP 54.83.191.64, user ubuntu, project at ~/AfricAir, security group sg-0beb4ceac7618ddb0.
+
+SSH key paths : C:/Users/Nnenna/OneDrive/Desktop/AfricAir/my-key (root) and scripts/ops/my-key.
+
+Docker on server : Old standalone docker-compose installed; needs docker-compose-plugin for docker compose command to work properly.
+
+Port 8080 : Open in both ufw and EC2 security group. Docker proxy confirmed listening.
+
+Disk space : Server has very limited disk space (~5GB total). Builds fail with ENOSPC. Must run docker system prune -af --volumes before large builds.
+
+System PostgreSQL : Conflicts with Docker db container on port 5432. Must sudo systemctl stop postgresql before starting stack.
+
+pnpm workspace : Root pnpm-lock.yaml must be copied into Docker build context; server Dockerfile copies from root workspace.
+
+GitHub repo : https://github.com/ninamonopoly/AfricAir, branch main.
+
+Most Recent Topic
+Topic : Installing docker-compose-plugin to fix KeyError: 'ContainerConfig' bug in old standalone docker-compose, then getting AfricAir frontend running at http://54.83.191.64:8080.
+
+Progress :
+
+Old docker-compose (standalone, Python-based) threw KeyError: 'ContainerConfig' when trying to recreate containers.
+
+Instructed user to install docker-compose-plugin and use docker compose (with space) instead.
+
+Prior to this, fixed frontend to serve AfricAir Vite app (not employee app) by creating root Dockerfile and deploy/nginx/docker.conf.
+
+Disk space issues repeatedly interrupted builds; freed via docker system prune and snap removal.
+
+Stack not yet confirmed running successfully at http://54.83.191.64:8080.
+
+Tools Used :
+
+fsRead docker-compose.yml, server/.env.example, .gitignore, deploy/systemd/africair-api.service, frontend/Dockerfile, deploy/nginx/africair.conf, server/Dockerfile, server/package.json: Read existing configs to understand structure.
+
+fsWrite config/staging.env: Created non-secret staging settings.
+
+fsWrite secrets.example/db_password, admin_token, promo_codes: Created dummy secret files.
+
+fsWrite Dockerfile: Created AfricAir root frontend Dockerfile.
+
+fsWrite deploy/nginx/docker.conf: Created Docker-specific nginx config proxying to api service.
+
+fsWrite server/Dockerfile: Created multi-stage API Dockerfile.
+
+fsReplace docker-compose.yml: Added api service, secrets, updated frontend and db services.
+
+fsReplace .gitignore: Added secrets/ and config secret patterns.
+
+fsReplace deploy/systemd/africair-api.service: Added api.env EnvironmentFile.
+
+fsReplace scripts/setup-server.sh: Added /etc/africair/api.env creation block.
+
+executeBash mkdir config, secrets, secrets.example: Created directories.
+
+---
+
+## Docker Module (Project 2)
+
+### Stack
+
+- `docker-compose.yml`: Three services — `db` (postgres:15), `api` (Node.js, builds from `server/Dockerfile`), `frontend` (Vite/React, builds from root `Dockerfile`).
+- `Dockerfile` (root): Multi-stage. Build stage: node:22-alpine, `pnpm install --frozen-lockfile`, `pnpm build`. Runtime stage: nginx:alpine, serves `dist/` with `deploy/nginx/docker.conf`.
+- `server/Dockerfile`: Multi-stage. Copies root workspace files, builds API, runtime stage runs `node server/dist/index.js`.
+- `deploy/nginx/docker.conf`: Proxies `/api/` to `http://api:4000`, SPA fallback, assets cache, `/healthz` inline 200.
+- `config/staging.env`: Non-secret env vars (APP_ENV, BRAND_NAME, SERVICE_FEE_USD, DEFAULT_CURRENCY, etc.).
+- `secrets/`: Runtime secret files (not committed). `secrets.example/` has dummy values for reference.
+
+### Issues encountered and fixes
+
+- **Old `docker-compose` (standalone 1.29.2)**: Threw `KeyError: 'ContainerConfig'` bug. Fix: install `docker-compose-plugin` and use `docker compose` (with space).
+- **`docker compose` not found after plugin install**: Docker daemon wasn't running. Fix: `sudo systemctl start docker && sudo systemctl enable docker`.
+- **Disk full (ENOSPC)**: 6.8 GB root volume repeatedly filled during builds. Fix: `docker system prune -af --volumes`, `sudo apt-get clean`, removed snap packages. Long-term fix: resize EC2 volume to 20 GB via AWS Console, then `sudo growpart /dev/nvme0n1 1 && sudo resize2fs /dev/root`.
+- **Port 5432 already in use**: System PostgreSQL conflicted with Docker `db` container. Fix: `sudo systemctl stop postgresql && sudo systemctl disable postgresql`.
+- **Frontend serving employee app instead of AfricAir**: Server's `docker-compose.yml` had `build: ./frontend` (old path). Root `Dockerfile` was never committed. Fix: committed `Dockerfile` and `deploy/nginx/docker.conf`, pushed, pulled on server, removed stale image with `docker rmi africair-frontend:latest`, rebuilt.
+- **`docker-compose-plugin` install failed (disk full)**: Freed space first with `docker system prune`, then retried install.
+
+### Commands run
+
+```bash
+# Add Docker apt repo and install compose plugin
+sudo apt-get install -y ca-certificates curl gnupg
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update && sudo apt-get install -y docker-compose-plugin
+
+# Free disk space
+docker system prune -af --volumes
+sudo apt-get clean
+sudo rm -rf /var/cache/apt/archives/*.deb
+
+# Stop conflicting system PostgreSQL
+sudo systemctl stop postgresql
+sudo systemctl disable postgresql
+
+# Start Docker daemon
+sudo systemctl start docker
+sudo systemctl enable docker
+
+# Bring stack up
+cd ~/AfricAir
+git pull
+docker compose down
+docker rmi africair-frontend:latest
+docker compose up -d --build
+```
+
+### Verification
+
+```bash
+docker compose ps
+curl -s http://localhost:8080 | grep -i "<title>"
+curl -s http://localhost:4000/api/healthz
+```
+
+AfricAir frontend running at `http://54.83.191.64:8080`.
+
