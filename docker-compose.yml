@@ -7,18 +7,47 @@ services:
     image: postgres:15
     restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: employees
+      POSTGRES_USER: africair
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      POSTGRES_DB: africair
     ports:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    secrets:
+      - db_password
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U africair"]
       interval: 5s
       timeout: 5s
       retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - config/staging.env
+    environment:
+      PORT: 4000
+      PGHOST: db
+      PGPORT: 5432
+      PGDATABASE: africair
+      PGUSER: africair
+      PGPASSWORD_FILE: /run/secrets/db_password
+      ADMIN_TOKEN_FILE: /run/secrets/admin_token
+      PROMO_CODES_FILE: /run/secrets/promo_codes
+      MIGRATE_ON_START: "true"
+    ports:
+      - "4000:4000"
+    secrets:
+      - db_password
+      - admin_token
+      - promo_codes
+    depends_on:
+      db:
+        condition: service_healthy
 
   backend:
     build: ./backend-node
@@ -38,6 +67,14 @@ services:
       - "8080:80"
     depends_on:
       - backend
+
+secrets:
+  db_password:
+    file: ./secrets/db_password
+  admin_token:
+    file: ./secrets/admin_token
+  promo_codes:
+    file: ./secrets/promo_codes
 
 volumes:
   postgres-data:
