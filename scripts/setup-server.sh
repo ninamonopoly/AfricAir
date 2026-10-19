@@ -18,6 +18,21 @@ if ! id africair &>/dev/null; then
   sudo useradd --system --no-create-home --shell /usr/sbin/nologin africair
 fi
 
+# Config directory and non-secret env file
+sudo mkdir -p /etc/africair
+if [[ ! -f /etc/africair/api.env ]]; then
+  sudo tee /etc/africair/api.env > /dev/null <<'EOF'
+APP_ENV=staging
+APP_VERSION=1.0.0
+ANNOUNCEMENT_TEXT=Welcome to the AfricAir staging server
+ANNOUNCEMENT_LEVEL=info
+SERVICE_FEE_USD=9
+DEFAULT_CURRENCY=KES
+EOF
+fi
+sudo chown root:africair /etc/africair/api.env
+sudo chmod 0640 /etc/africair/api.env
+
 # Directory layout
 sudo mkdir -p /opt/africair/releases /opt/africair/shared
 if [ ! -L /opt/africair/current ]; then

@@ -12,7 +12,9 @@ ExecStart=/usr/bin/node server/dist/index.js
 Restart=on-failure
 RestartSec=5s
 
-# Load runtime config and secrets from /etc/africair/env
+# Non-secret runtime config (root:africair 0640)
+EnvironmentFile=-/etc/africair/api.env
+# Secrets (root:africair 0640, never committed)
 EnvironmentFile=-/etc/africair/env
 
 StandardOutput=journal
