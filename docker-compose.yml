@@ -49,24 +49,15 @@ services:
       db:
         condition: service_healthy
 
-  backend:
-    build: ./backend-node
-    restart: unless-stopped
-    environment:
-      DATABASE_URL: postgresql://postgres:postgres@db:5432/employees
-    ports:
-      - "5000:5000"
-    depends_on:
-      db:
-        condition: service_healthy
-
   frontend:
-    build: ./frontend
+    build:
+      context: .
+      dockerfile: Dockerfile
     restart: unless-stopped
     ports:
       - "8080:80"
     depends_on:
-      - backend
+      - api
 
 secrets:
   db_password:
