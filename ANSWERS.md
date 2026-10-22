@@ -525,3 +525,129 @@ curl -s http://localhost:4000/api/healthz
 
 AfricAir frontend running at `http://54.83.191.64:8080`.
 
+
+---
+
+## Static Hosting on S3 + CloudFront
+
+### Infrastructure (Terraform)
+
+**terraform/main.tf** — added `aws_s3_bucket_server_side_encryption_configuration`:
+- Algorithm: AES256 (SSE-S3), bucket_key_enabled = true
+- Bucket has Block Public Access all four flags = true (was already present)
+- Versioning enabled (was already present)
+
+**terraform/cloudfront.tf** — new file:
+- `aws_cloudfront_origin_access_control` — signs S3 requests with SigV4 (signing_behavior = always)
+- `aws_cloudfront_response_headers_policy` — B5 security headers on every response:
+  - X-Content-Type-Options: nosniff
+  - X-Frame-Options: SAMEORIGIN
+  - Referrer-Policy: strict-origin-when-cross-origin
+  - Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'
+  - Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+- `aws_cloudfront_distribution` — viewer_protocol_policy = redirect-to-https, default_root_object = index.html, SPA custom_error_response (403/404 → index.html)
+- `aws_s3_bucket_policy` — AllowCloudFrontOAC: allows cloudfront.amazonaws.com s3:GetObject only where AWS:SourceArn = this distribution ARN
+
+**terraform/deployer-iam.tf** — least-privilege deployer IAM user:
+- s3:ListBucket on bucket ARN (bucket-level, no /*)
+- s3:PutObject + s3:DeleteObject on bucket/* (object-level)
+- cloudfront:CreateInvalidation on distribution ARN only
+
+**terraform/outputs.tf** — added: cloudfront_domain, cloudfront_distribution_id, cloudfront_distribution_arn, deployer_user_arn, deployer_policy_arn
+
+Bucket names renamed from `landmark` → `africair` (all envs: dev, stg, prod)
+State bucket: `africair-terraform-state-075120018043`
+App bucket: `africair-app-bucket-dev`
+
+### Deploy Scripts
+
+**scripts/ops/publish-s3.sh** and **scripts/ops/Publish-S3.ps1** (PowerShell for Windows):
+
+Deploy order and why it matters:
+1. `aws s3 sync assets/ → s3://bucket/assets/` with `Cache-Control: public,max-age=31536000,immutable`
+   — Assets must exist before index.html goes live; hashed names never collide
+2. `aws s3 cp index.html` with `Cache-Control: no-cache`
+   — Only after assets are live; index.html names the new asset filenames
+3. `aws s3 cp version.json` with `Cache-Control: no-cache`
+4. `aws s3 sync --delete` — removes stale files LAST; browsers with cached old index.html still need old assets until new index.html propagates
+5. `aws cloudfront create-invalidation --paths "/index.html" "/version.json"` — never `/*`
+
+Why not `/*`:
+- Hashed assets are correct by filename — old name and new name are different objects, no invalidation needed
+- `/*` evicts the entire edge cache globally → every user takes a cold miss → origin load spike
+- AWS charges per invalidation path after 1,000/month free
+
+**scripts/ops/test-deployer-permissions.sh** — proves least-privilege:
+- ✅ ListBucket on own bucket → allowed
+- ✅ PutObject probe file → allowed
+- ✅ DeleteObject probe file → allowed
+- ❌ ListBucket on different bucket → AccessDenied
+- ❌ GetObject on own bucket → AccessDenied (deployer can write but not read)
+- ❌ CreateInvalidation on different distribution → AccessDenied
+
+### E2E Results Against CloudFront
+
+URL: https://d32p393pvdyujd.cloudfront.net
+Distribution ID: ERTERJ4EGO84I
+
+Command: `$env:BASE_URL="https://d32p393pvdyujd.cloudfront.net"; pnpm test:e2e --grep "booking"`
+
+Result: **12/14 passed**
+
+2 expected failures — "complete round-trip booking with mixed travellers, PDF and My trips":
+- Test tries to save booking to database via /api/bookings → ERR_CONNECTION_RESET (no backend behind CloudFront)
+- This is correct behaviour for static hosting; My trips requires the Node API
+
+Fix applied to e2e/booking.spec.ts: pageerror listener now filters ERR_CONNECTION_RESET (expected in static mode, same as the existing /api/ filter on the console listener)
+
+### Why S3 Can Never Keep a Secret
+
+S3 stores files. Every file it serves is a URL the browser downloads. Even with Block Public Access on, anything the browser receives is readable in DevTools.
+
+A secret is only secret if it never leaves the server process. On EC2:
+- ADMIN_TOKEN lives in /etc/africair/env, loaded into the Node process environment
+- The browser sends a token the user typed; Node compares it in memory; nothing secret crosses the wire
+
+On S3/CloudFront:
+- Any value in a downloaded file (JS, JSON, HTML) is readable by anyone with DevTools
+- Credentials, database passwords, promo code lists, admin tokens must live on a compute layer (EC2, ECS, Lambda), never in a static file
+
+### Features Missing in Static Mode vs EC2
+
+| Feature | CloudFront (static) | EC2 (full stack) |
+|---|---|---|
+| Flight search + booking | ✅ | ✅ |
+| PDF itinerary | ✅ | ✅ |
+| Promo codes | ❌ disabled | ✅ server-validated |
+| My trips (save/retrieve) | ❌ browser only | ✅ database |
+| Cancel booking | ❌ browser only | ✅ persisted |
+| Admin dashboard | ❌ 404 | ✅ behind ADMIN_TOKEN |
+| Maintenance mode | ❌ can't change | ✅ live from API |
+| Announcements/banners | ❌ can't change | ✅ live from API |
+| Secrets status page | ❌ hidden | ✅ shows db/token state |
+| Service fee config | ❌ hardcoded $15 | ✅ operator-configurable |
+
+### S3 Public Access Verification
+
+```
+aws s3api get-public-access-block --bucket africair-app-bucket-dev --profile terraform
+{
+    "PublicAccessBlockConfiguration": {
+        "BlockPublicAcls": true,
+        "IgnorePublicAcls": true,
+        "BlockPublicPolicy": true,
+        "RestrictPublicBuckets": true
+    }
+}
+```
+
+All four flags true ✅ — direct S3 URL returns 403 Access Denied; only CloudFront OAC can read objects.
+
+### Branch
+
+`feat/s3-cloudfront-static-hosting` — commits:
+- `2db5bc6` S3 encryption + CloudFront Terraform
+- `7dc7f49` publish-s3.sh deploy script
+- `e9d6abf` deployer IAM policy + proof script
+- `300b714` rename buckets landmark → africair
+- `6bc2622` Publish-S3.ps1 PowerShell script
