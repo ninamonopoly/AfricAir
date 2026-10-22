@@ -25,7 +25,10 @@ LABEL org.opencontainers.image.revision="${GIT_SHA}" \
       org.opencontainers.image.source="${SOURCE_URL}"
 
 COPY --from=build /app/dist /usr/share/nginx/html
-COPY deploy/nginx/docker.conf /etc/nginx/conf.d/default.conf
+# envsubst template — nginx:alpine processes /etc/nginx/templates/*.template
+# at startup, substituting API_UPSTREAM and APP_ENV, writing the result to
+# /etc/nginx/conf.d/default.conf. The static docker.conf is no longer needed.
+COPY deploy/nginx/templates/ /etc/nginx/templates/
 
 # HEALTHCHECK uses BusyBox wget (available in nginx:alpine)
 # --spider = HEAD-only request (no body downloaded)
