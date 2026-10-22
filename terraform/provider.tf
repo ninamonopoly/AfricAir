@@ -3,7 +3,7 @@ terraform {
   required_version = ">= 1.5.0"
 
   backend "s3" {
-    bucket       = "landmark-terraform-state-file-075120018043"
+    bucket       = "africair-terraform-state-075120018043"
     key          = "eks/terraform.tfstate"
     region       = "us-east-1"
     profile      = "terraform"

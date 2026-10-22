@@ -16,7 +16,7 @@ node_min_size       = 2
 node_max_size       = 5
 
 # S3
-app_bucket_name = "landmark-app-bucket"
+app_bucket_name = "africair-app-bucket"
 
 # RDS
 db_name           = "employees"
