@@ -1,0 +1,155 @@
+# compose.yaml — AfricAir full staging stack (Docker Compose)
+#
+#   db       postgres:16-alpine, password from a Compose secret, named volume
+#   migrate  API image, runs `node dist/migrate.js` once after db is healthy
+#   api      API image, 2 replicas, starts only after migrate succeeds
+#   web      nginx/web image on host :8080, proxies /api/ to the api replicas
+#   e2e      Playwright image, runs the e2e suite against web (profile: test)
+#
+# Only `web` publishes a host port. db and api are reachable ONLY through the
+# user-defined network `africair`, which is how we prove they are not exposed.
+#
+# Run the stack:            docker compose up --build -d
+# Run the tests + exit code: docker compose --profile test up --build --exit-code-from e2e
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: africair
+      POSTGRES_DB: africair
+      # Password is read from the mounted secret file, never from a plain env var.
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    secrets:
+      - db_password
+    networks:
+      - africair
+    # NO ports: — db is reachable only inside the africair network.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U africair -d africair"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    command: ["node", "dist/migrate.js"]
+    env_file:
+      - config/staging.env
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: africair
+      PGUSER: africair
+      PGPASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
+    networks:
+      - africair
+    # Runs once; exits 0 on success. api waits for THIS to complete.
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    # Two replicas behind the web proxy — the load-balancing target.
+    deploy:
+      replicas: 2
+    # Plain settings come from the env file; secrets come from files.
+    env_file:
+      - config/staging.env
+    environment:
+      PORT: "4000"
+      METRICS_PORT: "9464"
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: africair
+      PGUSER: africair
+      PGPASSWORD_FILE: /run/secrets/db_password
+      ADMIN_TOKEN_FILE: /run/secrets/admin_token
+      PROMO_CODES_FILE: /run/secrets/promo_codes
+    secrets:
+      - db_password
+      - admin_token
+      - promo_codes
+    networks:
+      - africair
+    # NO ports: — api is reachable only through web's /api/ proxy.
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:4000/api/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      API_UPSTREAM: http://api:4000
+      APP_ENV: staging
+    ports:
+      - "8080:8080"
+    networks:
+      - africair
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  e2e:
+    image: mcr.microsoft.com/playwright:v1.64.0-noble
+    profiles: ["test"]
+    working_dir: /work
+    volumes:
+      - ./:/work
+    environment:
+      BASE_URL: http://web:8080
+      CI: "true"
+    networks:
+      - africair
+    depends_on:
+      web:
+        condition: service_healthy
+    # Install deps inside the mounted repo, then run the Playwright suite
+    # against the running web service. Exit code propagates via --exit-code-from.
+    command: >
+      sh -c "corepack enable &&
+             pnpm install --frozen-lockfile &&
+             BASE_URL=http://web:8080 pnpm test:e2e"
+
+secrets:
+  db_password:
+    file: ./secrets/db_password
+  admin_token:
+    file: ./secrets/admin_token
+  promo_codes:
+    file: ./secrets/promo_codes
+
+volumes:
+  postgres-data:
+
+networks:
+  africair:
+    driver: bridge

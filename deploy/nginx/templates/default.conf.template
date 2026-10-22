@@ -67,17 +67,39 @@ server {
     }
 
     # ── API proxy ─────────────────────────────────────────────────────────────
-    # API_UPSTREAM is substituted by envsubst at startup.
+    # API_UPSTREAM is substituted by envsubst at startup (e.g. http://api:4000).
     # nginx $variables are NOT substituted (envsubst only processes the two
     # declared vars above).
+    #
+    # Docker embedded DNS + variable proxy_pass for live load-balancing:
+    #   resolver 127.0.0.11      — Docker's built-in DNS server. Every Compose
+    #                              network has it; it returns ALL healthy
+    #                              container IPs for a service name like `api`.
+    #   valid=10s                — re-resolve the name every 10s instead of
+    #                              caching the first answer forever.
+    #   $api_upstream variable   — THIS is the key. If proxy_pass names a host
+    #                              literally, nginx resolves it ONCE at startup
+    #                              and pins that single IP for the life of the
+    #                              process — so one replica answers every request.
+    #                              Putting the host in a VARIABLE forces nginx to
+    #                              use the runtime resolver on each request, so it
+    #                              rotates across both replicas' current IPs.
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
     location /api/ {
-        proxy_pass         ${API_UPSTREAM};
+        set                $api_upstream ${API_UPSTREAM};
+        # Variable proxy_pass carries no URI, so forward the original request
+        # path explicitly ($request_uri keeps the /api/ prefix the API expects).
+        proxy_pass         $api_upstream$request_uri;
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;
         proxy_set_header   X-Real-IP         $remote_addr;
         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header   X-Forwarded-Proto $scheme;
         proxy_read_timeout 10s;
+
+        # Load-balancing proof: which replica (container IP:port) answered.
+        add_header X-Upstream $upstream_addr always;
     }
 
     # ── SPA fallback ─────────────────────────────────────────────────────────
