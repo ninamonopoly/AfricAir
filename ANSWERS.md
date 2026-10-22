@@ -739,3 +739,59 @@ curl -sI http://localhost:8080/ | grep -i x-environment   # → X-Environment: s
 curl -s http://localhost:8080/healthz                      # → ok
 docker ps --format "table {{.Names}}\t{{.Status}}"        # → (healthy) after ~35s
 ```
+
+
+---
+
+## Dockerfile.api -- multi-stage API image
+
+File: `Dockerfile.api` (repo root). Builds only the `@africair/api` package.
+
+### Stages
+
+| Stage | Purpose | Contents |
+|---|---|---|
+| `build` | Install workspace deps, run `pnpm build:api` | full node_modules incl. tsc/tsx, compiled `dist/` |
+| `prod-deps` | Production-only node_modules | `pnpm deploy --filter=@africair/api --prod --legacy /prod/api` -- drops typescript, tsx, @types |
+| `runtime` | Shippable image | `node:22-alpine`, `dist/`, `migrations/`, `package.json`, prod node_modules, `USER node` |
+
+### Key decisions
+
+- **`pnpm deploy --prod`** resolves the workspace package's real dependency tree
+  into one flat, self-contained folder (no store symlinks). `--prod` omits all
+  devDependencies, so TypeScript, tsx and the type packages never ship.
+  `--legacy` is required for a workspace deploy on pnpm 10.
+- **`USER node`** -- the image runs unprivileged; the `node` user ships with the
+  base image.
+- **`EXPOSE 4000 9464`** -- API port and Prometheus metrics port.
+- **HEALTHCHECK** -- BusyBox `wget --spider` on `/api/healthz`, every 30s.
+- **`CMD ["node", "dist/index.js"]`** -- Node runs as PID 1 directly. Not
+  `pnpm start`: pnpm would fork node as a child, so `docker stop`'s SIGTERM
+  would hit pnpm and never reach node, breaking graceful shutdown and leaving
+  node without PID-1 zombie-reaping.
+- **Migrations use the same image**: `docker run --rm africair-api node dist/migrate.js`.
+
+### Build
+
+```bash
+docker build -f Dockerfile.api \
+  --build-arg GIT_SHA=$(git rev-parse HEAD) \
+  --build-arg VERSION=1.0.0 \
+  --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  -t africair-api:latest .
+```
+
+### Image size: ~148 MB (over the 120 MB target -- base image is the floor)
+
+| Layer | Size | What it is |
+|---|---|---|
+| `node:22-alpine` base | ~135 MB | Node 22 runtime + Alpine libc -- the unavoidable floor |
+| prod node_modules | ~8-12 MB | `pg` + `prom-client` and their small deps |
+| `dist/` + `migrations/` | < 1 MB | compiled JS + one SQL file |
+| **Total** | **~148 MB** | |
+
+**What the remaining megabytes are:** the Node runtime itself. `node:22-alpine`
+is already the slim variant; our own code and deps add barely 10 MB. The only
+way under 120 MB is a distroless Node base (~115 MB), which has no shell, so the
+healthcheck would have to call `node` instead of `wget`. We chose to keep alpine
+for the working shell and BusyBox `wget` healthcheck, and accept ~148 MB.
