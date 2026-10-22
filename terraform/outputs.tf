@@ -46,3 +46,30 @@ output "ecr_frontend_url" {
 output "secrets_manager_secret_arn" {
   value = aws_secretsmanager_secret.db_credentials.arn
 }
+
+# CloudFront outputs
+output "cloudfront_domain" {
+  description = "CloudFront distribution domain name"
+  value       = aws_cloudfront_distribution.app.domain_name
+}
+
+output "cloudfront_distribution_id" {
+  description = "CloudFront distribution ID (used by publish-s3.sh)"
+  value       = aws_cloudfront_distribution.app.id
+}
+
+output "cloudfront_distribution_arn" {
+  description = "CloudFront distribution ARN (used in deployer IAM policy)"
+  value       = aws_cloudfront_distribution.app.arn
+}
+
+# Deployer IAM outputs
+output "deployer_user_arn" {
+  description = "ARN of the CI deployer IAM user"
+  value       = aws_iam_user.deployer.arn
+}
+
+output "deployer_policy_arn" {
+  description = "ARN of the least-privilege deployer policy"
+  value       = aws_iam_policy.deployer.arn
+}
