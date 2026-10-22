@@ -651,3 +651,91 @@ All four flags true ✅ — direct S3 URL returns 403 Access Denied; only CloudF
 - `e9d6abf` deployer IAM policy + proof script
 - `300b714` rename buckets landmark → africair
 - `6bc2622` Publish-S3.ps1 PowerShell script
+
+
+---
+
+## Docker Containerisation
+
+### Dockerfile changes
+
+**OCI image labels** — added as `ARG` + `LABEL` in the runtime stage:
+```
+org.opencontainers.image.revision  = GIT_SHA build-arg
+org.opencontainers.image.version   = VERSION build-arg
+org.opencontainers.image.created   = BUILD_DATE build-arg (ISO 8601)
+org.opencontainers.image.source    = SOURCE_URL build-arg
+```
+Pass at build time:
+```powershell
+$GIT_SHA = git rev-parse HEAD
+$BUILD_DATE = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
+docker build --build-arg GIT_SHA=$GIT_SHA --build-arg VERSION=1.0.0 --build-arg BUILD_DATE=$BUILD_DATE -t africair:latest .
+```
+
+**HEALTHCHECK** — uses BusyBox `wget` (available in `nginx:alpine`):
+```
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD wget --spider --quiet http://localhost:8080/healthz || exit 1
+```
+- `--spider`: HEAD-only request, no body downloaded
+- `start-period=5s`: gives nginx time to start before failures count
+- `retries=3`: 3 consecutive failures = container marked unhealthy
+
+**EXPOSE 8080** — changed from 80. nginx now listens on 8080 (non-root port convention).
+
+**Template instead of static config** — `COPY deploy/nginx/templates/ /etc/nginx/templates/` replaces the old static `docker.conf` copy. nginx:alpine's entrypoint runs envsubst on `*.template` files at startup.
+
+### nginx envsubst template
+
+File: `deploy/nginx/templates/default.conf.template`
+
+Variables substituted at container startup:
+- `${API_UPSTREAM}` → e.g. `http://api:4000`
+- `${APP_ENV}` → e.g. `staging`, `production`
+
+nginx's own `$variables` (`$host`, `$remote_addr`, etc.) are left untouched.
+
+Features in the template:
+- `listen 8080`
+- gzip (JS, CSS, JSON, SVG, text)
+- Security headers: X-Content-Type-Options, X-Frame-Options, Referrer-Policy, CSP (always)
+- `X-Environment: ${APP_ENV}` response header
+- `/healthz` — 200 ok, access_log off
+- `/assets/` — `Cache-Control: public, max-age=31536000, immutable`
+- `/index.html` and `/version.json` — `Cache-Control: no-cache`
+- `/api/` proxy to `${API_UPSTREAM}` with X-Forwarded-For
+- SPA fallback `/` → index.html
+
+### docker-compose.yml changes
+
+- `frontend` service: added `API_UPSTREAM: http://api:4000` and `APP_ENV: staging`
+- `frontend` ports: `8080:80` → `8080:8080` (matches nginx listen port)
+- `db` ports mapping removed — host PostgreSQL was occupying 5432; the api container reaches db via Docker's internal network, no host port needed
+
+### Port conflict on EC2
+
+Host PostgreSQL was running on port 5432. Docker tried to bind `0.0.0.0:5432` for the db container → `address already in use`. Fix: removed the db `ports:` mapping from docker-compose.yml. The api container still reaches db at `db:5432` via the Docker bridge network.
+
+### Build command (PowerShell / Windows)
+
+```powershell
+$GIT_SHA = git rev-parse HEAD
+$BUILD_DATE = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
+docker build `
+  --build-arg GIT_SHA=$GIT_SHA `
+  --build-arg VERSION=1.0.0 `
+  --build-arg BUILD_DATE=$BUILD_DATE `
+  --build-arg SOURCE_URL=https://github.com/ninamonopoly/AfricAir `
+  -t africair:latest .
+```
+
+### Verify labels and health
+
+```bash
+docker inspect africair:latest --format '{{json .Config.Labels}}' | jq
+docker compose up -d
+curl -sI http://localhost:8080/ | grep -i x-environment   # → X-Environment: staging
+curl -s http://localhost:8080/healthz                      # → ok
+docker ps --format "table {{.Names}}\t{{.Status}}"        # → (healthy) after ~35s
+```
