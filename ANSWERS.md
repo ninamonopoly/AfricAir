@@ -795,3 +795,85 @@ is already the slim variant; our own code and deps add barely 10 MB. The only
 way under 120 MB is a distroless Node base (~115 MB), which has no shell, so the
 healthcheck would have to call `node` instead of `wget`. We chose to keep alpine
 for the working shell and BusyBox `wget` healthcheck, and accept ~148 MB.
+
+
+---
+
+## Docker Compose staging stack — verification runbook
+
+Bring up the serving stack (no Playwright, light on RAM):
+
+```bash
+cd ~/AfricAir
+docker compose -f compose.yaml up --build -d db migrate api web
+```
+
+All browser checks are at `http://localhost:8080`.
+
+### 1. Settings come from config/staging.env
+- Home: orange **STAGING** banner, announcement "You are on the Docker Compose
+  staging stack", brand **AfricAir Staging**, prices in **NGN**.
+- Review page: **AfricAir service fee $5** (`SERVICE_FEE_USD=5`).
+
+### 2. /#/status
+- Storage: **PostgreSQL database**.
+- db_password / admin_token / promo_codes each **Configured · source: file**.
+
+### 3. Promo + admin
+- Book a flight, apply **SAVE10** → discount shows in the fare and in the PDF.
+- `/#/admin` + the admin token value → the booking is listed.
+
+### 4. Maintenance mode
+```bash
+sed -i 's/^MAINTENANCE_MODE=.*/MAINTENANCE_MODE=true/' config/staging.env \
+  || echo "MAINTENANCE_MODE=true" >> config/staging.env
+docker compose -f compose.yaml up -d api      # RECREATE api with the new env
+```
+Booking is blocked ("Bookings are paused for maintenance").
+
+**Why `docker compose restart` is NOT enough after editing an env file:**
+`env_file` is read only when a container is **created**, and the values are
+baked into that container's environment at creation. `restart` stops and starts
+the *same* container with the *same* frozen env — it never re-reads the file.
+`up -d api` **recreates** the container, taking a fresh snapshot of the edited
+file. restart = same env; up = new container, new env.
+
+### 5. Rotate the admin token with NO restart
+```bash
+echo "new-admin-token-value" > secrets/admin_token
+```
+Within `SECRET_REFRESH_SECONDS` (10s): the fingerprint on `/#/status` changes,
+the old token gives "Invalid admin token", the new one works. The API's
+`secretReader` re-reads `*_FILE` secrets every 10s, so a rotated file secret is
+picked up live — an env-var secret would need a restart.
+
+### 6. Stop db → graceful failure and recovery
+```bash
+docker compose -f compose.yaml stop db
+curl -s localhost:8080/api/readyz          # 503
+# /#/status shows the database error; booking fails with a clear message
+docker compose -f compose.yaml start db
+curl -s localhost:8080/api/readyz          # 200 again — api NOT restarted
+```
+The connection pool reconnects on its own; api recovers without a restart.
+
+### 7. No secret values in the api environment
+```bash
+docker compose -f compose.yaml exec api env | grep -i token
+# -> ADMIN_TOKEN_FILE=/run/secrets/admin_token   (a PATH, never the value)
+```
+
+**Why `*_FILE` secrets are safer than env-var secrets:**
+- **`docker inspect`** prints a container's env vars in plain text — an env-var
+  secret is readable by anyone who can inspect the container. A `_FILE` var only
+  exposes a path.
+- **`/proc/<pid>/environ`** holds a running process's full environment on disk;
+  any user who can read it (same UID or root) sees every env-var secret. A file
+  secret is never in the environment — it lives at a permissioned path.
+- **Crash dumps / logs**: core dumps and many error/logging frameworks capture
+  the whole environment block, so env-var secrets leak into dump files and log
+  aggregators. A path leaks nothing.
+
+In short: an env var is broadcast to inspect, `/proc`, child processes and crash
+dumps; a file secret is read on demand from a permissioned path and can be
+rotated in place without a restart.
