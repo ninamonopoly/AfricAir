@@ -1,0 +1,91 @@
+# syntax=docker/dockerfile:1
+
+# =============================================================================
+# Dockerfile.api -- multi-stage build for @africair/api
+#
+# Stages:
+#   build      install workspace deps, compile TypeScript (pnpm build:api)
+#   prod-deps  production-only node_modules (no tsc, no tsx, no types)
+#   runtime    distroless-lean node:22-alpine with dist/, migrations/,
+#              package.json and the prod node_modules; runs as USER node
+#
+#   Default CMD runs the API.  Run migrations with the SAME image:
+#       docker run --rm africair-api node dist/migrate.js
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Stage 1: build -- full toolchain, compiles TS -> dist/
+# -----------------------------------------------------------------------------
+FROM node:22-alpine AS build
+WORKDIR /app
+
+# pnpm via corepack (version pinned by packageManager in package.json)
+RUN corepack enable
+
+# Copy only manifests first so the install layer caches across code changes
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY server/package.json ./server/
+
+# Full install (includes dev deps: typescript, tsx, @types/*)
+RUN pnpm install --frozen-lockfile
+
+# Now bring in the API source and build
+COPY server/ ./server/
+RUN pnpm build:api
+
+# -----------------------------------------------------------------------------
+# Stage 2: prod-deps -- a production-only node_modules for @africair/api
+#
+# `pnpm deploy` resolves the workspace package's production dependency tree and
+# writes a self-contained directory (flat node_modules, package.json, no
+# symlinks back into the monorepo).  --prod drops devDependencies, so
+# typescript / tsx / @types never reach the runtime image.
+#   --legacy is required on pnpm 10 to deploy from a workspace without an
+#   injected-workspace setup; it is what the pnpm 10 docs call for here.
+# -----------------------------------------------------------------------------
+FROM build AS prod-deps
+WORKDIR /app
+RUN pnpm deploy --filter=@africair/api --prod --legacy /prod/api
+
+# -----------------------------------------------------------------------------
+# Stage 3: runtime -- small, non-root, health-checked
+# -----------------------------------------------------------------------------
+FROM node:22-alpine AS runtime
+WORKDIR /app
+ENV NODE_ENV=production \
+    PORT=4000 \
+    METRICS_PORT=9464
+
+# OCI provenance labels (override with --build-arg at build time)
+ARG GIT_SHA=unknown
+ARG VERSION=1.0.0
+ARG BUILD_DATE=unknown
+ARG SOURCE_URL=https://github.com/ninamonopoly/AfricAir
+LABEL org.opencontainers.image.title="africair-api" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.source="${SOURCE_URL}"
+
+# Production node_modules + package.json (flattened by pnpm deploy)
+COPY --from=prod-deps --chown=node:node /prod/api/node_modules ./node_modules
+COPY --from=prod-deps --chown=node:node /prod/api/package.json ./package.json
+
+# Compiled output and the SQL migrations the migrate command applies
+COPY --from=build --chown=node:node /app/server/dist ./dist
+COPY --from=build --chown=node:node /app/server/migrations ./migrations
+
+# Drop root -- the node:alpine image ships an unprivileged `node` user
+USER node
+
+# 4000 = API, 9464 = Prometheus metrics endpoint
+EXPOSE 4000 9464
+
+# Liveness: hit the app's own health route with BusyBox wget
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD wget --spider -q http://127.0.0.1:4000/api/healthz || exit 1
+
+# Node runs as PID 1 directly -- no `pnpm start` wrapper (see drill 6:
+# pnpm would fork node as a child, so signals/SIGTERM would not reach the
+# API and PID 1 zombie-reaping would be pnpm's job, not node's).
+CMD ["node", "dist/index.js"]

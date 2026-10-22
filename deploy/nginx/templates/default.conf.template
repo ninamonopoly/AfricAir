@@ -1,0 +1,111 @@
+# /etc/nginx/templates/default.conf.template
+#
+# Processed by envsubst at container startup (nginx:alpine built-in).
+# Variables substituted:
+#   API_UPSTREAM  — e.g. http://api:4000   (required)
+#   APP_ENV       — e.g. staging, production (required)
+#
+# nginx's own $variables are written as ${dollar}var or left as nginx
+# dollar-sign expressions; envsubst is called with only the two vars
+# above so nginx variables are left untouched.
+#
+# In docker-compose / Kubernetes, set:
+#   environment:
+#     API_UPSTREAM: http://api:4000
+#     APP_ENV: staging
+
+server {
+    listen 8080;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # ── Gzip ─────────────────────────────────────────────────────────────────
+    gzip on;
+    gzip_types text/css application/javascript application/json image/svg+xml text/plain;
+    gzip_min_length 1024;
+    gzip_vary on;
+
+    # ── Security headers ─────────────────────────────────────────────────────
+    add_header X-Content-Type-Options  "nosniff"                          always;
+    add_header X-Frame-Options         "SAMEORIGIN"                       always;
+    add_header Referrer-Policy         "strict-origin-when-cross-origin"  always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none';" always;
+
+    # ── X-Environment: injected from APP_ENV env var ──────────────────────────
+    add_header X-Environment "${APP_ENV}" always;
+
+    # ── Health probe ─────────────────────────────────────────────────────────
+    location = /healthz {
+        access_log off;
+        add_header Content-Type "text/plain";
+        return 200 "ok\n";
+    }
+
+    # ── Hashed assets: cache forever ─────────────────────────────────────────
+    # Content-addressed filenames (e.g. main.a1b2c3.js) never change content,
+    # so max-age=31536000 + immutable is safe.
+    location ~* ^/assets/ {
+        expires max;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        try_files $uri =404;
+    }
+
+    # ── index.html: always revalidate ────────────────────────────────────────
+    location = /index.html {
+        expires -1;
+        add_header Cache-Control "no-cache" always;
+        try_files $uri =404;
+    }
+
+    # ── version.json: always revalidate ──────────────────────────────────────
+    location = /version.json {
+        expires -1;
+        add_header Cache-Control "no-cache" always;
+        try_files $uri =404;
+    }
+
+    # ── API proxy ─────────────────────────────────────────────────────────────
+    # API_UPSTREAM is substituted by envsubst at startup (e.g. http://api:4000).
+    # nginx $variables are NOT substituted (envsubst only processes the two
+    # declared vars above).
+    #
+    # Docker embedded DNS + variable proxy_pass for live load-balancing:
+    #   resolver 127.0.0.11      — Docker's built-in DNS server. Every Compose
+    #                              network has it; it returns ALL healthy
+    #                              container IPs for a service name like `api`.
+    #   valid=10s                — re-resolve the name every 10s instead of
+    #                              caching the first answer forever.
+    #   $api_upstream variable   — THIS is the key. If proxy_pass names a host
+    #                              literally, nginx resolves it ONCE at startup
+    #                              and pins that single IP for the life of the
+    #                              process — so one replica answers every request.
+    #                              Putting the host in a VARIABLE forces nginx to
+    #                              use the runtime resolver on each request, so it
+    #                              rotates across both replicas' current IPs.
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
+    location /api/ {
+        set                $api_upstream ${API_UPSTREAM};
+        # Variable proxy_pass carries no URI, so forward the original request
+        # path explicitly ($request_uri keeps the /api/ prefix the API expects).
+        proxy_pass         $api_upstream$request_uri;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_read_timeout 10s;
+
+        # Load-balancing proof: which replica (container IP:port) answered.
+        add_header X-Upstream $upstream_addr always;
+    }
+
+    # ── SPA fallback ─────────────────────────────────────────────────────────
+    location / {
+        expires -1;
+        add_header Cache-Control "no-cache" always;
+        try_files $uri $uri/ /index.html;
+    }
+}
