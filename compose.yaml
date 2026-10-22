@@ -39,7 +39,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
-    command: ["node", "dist/migrate.js"]
+    # pg (node-postgres) reads PGPASSWORD, NOT PGPASSWORD_FILE. Load the secret
+    # file into PGPASSWORD at startup, then run the migration.
+    command: ["sh", "-c", "export PGPASSWORD=\"$(cat /run/secrets/db_password)\" && exec node dist/migrate.js"]
     env_file:
       - config/staging.env
     environment:
@@ -47,7 +49,6 @@ services:
       PGPORT: "5432"
       PGDATABASE: africair
       PGUSER: africair
-      PGPASSWORD_FILE: /run/secrets/db_password
     secrets:
       - db_password
     networks:
@@ -66,6 +67,10 @@ services:
     # Two replicas behind the web proxy — the load-balancing target.
     deploy:
       replicas: 2
+    # pg reads PGPASSWORD (a string), not PGPASSWORD_FILE — load it from the
+    # secret file at startup, then exec the API. ADMIN_TOKEN_FILE and
+    # PROMO_CODES_FILE ARE handled by the app's own secret reader, so they stay.
+    command: ["sh", "-c", "export PGPASSWORD=\"$(cat /run/secrets/db_password)\" && exec node dist/index.js"]
     # Plain settings come from the env file; secrets come from files.
     env_file:
       - config/staging.env
@@ -76,7 +81,6 @@ services:
       PGPORT: "5432"
       PGDATABASE: africair
       PGUSER: africair
-      PGPASSWORD_FILE: /run/secrets/db_password
       ADMIN_TOKEN_FILE: /run/secrets/admin_token
       PROMO_CODES_FILE: /run/secrets/promo_codes
     secrets:
