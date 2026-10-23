@@ -89,6 +89,17 @@ services:
       - promo_codes
     networks:
       - africair
+    # ── Hardening: read-only root, no caps, no privilege escalation, limits ──
+    read_only: true
+    tmpfs:
+      - /tmp                      # only writable path the API needs
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 100
     # NO ports: — api is reachable only through web's /api/ proxy.
     depends_on:
       migrate:
@@ -112,6 +123,20 @@ services:
       - "8080:8080"
     networks:
       - africair
+    # ── Hardening: read-only root, no caps, no privilege escalation, limits ──
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx          # nginx proxy/temp caches
+      - /var/run                  # nginx.pid
+      - /etc/nginx/conf.d         # envsubst writes the processed template here at startup
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 100
     depends_on:
       api:
         condition: service_healthy
