@@ -877,3 +877,84 @@ docker compose -f compose.yaml exec api env | grep -i token
 In short: an env var is broadcast to inspect, `/proc`, child processes and crash
 dumps; a file secret is read on demand from a permissioned path and can be
 rotated in place without a restart.
+
+
+---
+
+## Container hardening (api + web)
+
+Both app containers run locked down. The required `docker run` flags map to
+Compose service keys as follows:
+
+| `docker run` flag | Compose key | Effect |
+|---|---|---|
+| `--read-only` | `read_only: true` | root filesystem is immutable |
+| `--tmpfs /tmp` | `tmpfs: [/tmp]` | only writable path, in RAM, wiped on stop |
+| `--cap-drop ALL` | `cap_drop: [ALL]` | drops every Linux capability |
+| `--security-opt no-new-privileges` | `security_opt: [no-new-privileges:true]` | a child process can never gain more privileges than its parent |
+| `--memory 128m` | `mem_limit: 128m` | OOM-killed past 128 MB |
+| `--cpus 0.5` | `cpus: 0.5` | at most half a core |
+| `--pids-limit 100` | `pids_limit: 100` | caps processes (fork-bomb guard) |
+
+### Why web needs extra tmpfs mounts
+
+A read-only root still has to let nginx write three runtime paths, so each is a
+small in-memory tmpfs:
+
+- `/var/cache/nginx` — proxy/temp caches
+- `/var/run` — `nginx.pid`
+- `/etc/nginx/conf.d` — envsubst writes the processed template here at startup
+
+Without these, nginx fails to start under `read_only: true`. The API writes
+nothing but `/tmp`.
+
+### Verify the hardening is active
+
+```bash
+docker inspect africair-api-1 --format \
+  '{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{.HostConfig.Memory}} {{.HostConfig.PidsLimit}}'
+# -> true [ALL] 134217728 100
+```
+
+### Note on the 128 MB limit
+
+Node with only `pg` + `prom-client` fits in 128 MB, but it is tight. If the api
+container exits 137 (SIGKILL/OOM) it is the memory limit biting, not a
+misconfiguration — raise `mem_limit` only if the real footprint demands it.
+
+
+### Root cause: why the web container breaks under `--read-only` (envsubst)
+
+**Symptom.** With `read_only: true`, the web container exits immediately at
+startup instead of serving.
+
+**Root cause.** The `nginx:alpine` entrypoint (`docker-entrypoint.sh`) runs
+`envsubst` over every `/etc/nginx/templates/*.template` at boot and **writes the
+rendered result into `/etc/nginx/conf.d/`** (default
+`NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx/conf.d`). A read-only root filesystem
+refuses that write, so the entrypoint fails before nginx ever loads a config and
+the container dies.
+
+```
+read-only root  ->  entrypoint envsubst writes /etc/nginx/conf.d/default.conf  ->  EROFS  ->  crash
+```
+
+**Fix (keeps `--read-only`).** Make only that one output directory writable by
+mounting it as an in-memory tmpfs — the root stays immutable:
+
+```yaml
+read_only: true
+tmpfs:
+  - /etc/nginx/conf.d   # envsubst renders the template here at startup
+  - /var/cache/nginx    # proxy/temp caches
+  - /var/run            # nginx.pid
+```
+
+**Alternative fix (the hint).** Instead of making the default folder writable,
+redirect the output with `NGINX_ENVSUBST_OUTPUT_DIR` to a path that is already
+writable (e.g. a tmpfs'd `/tmp/conf.d`) and `include` it. Either fix works; this
+stack uses the tmpfs-the-default-folder approach above, so no env var is needed.
+
+**Why not just drop `--read-only`?** That would let any process write anywhere
+in the container — exactly the attack surface the hardening is meant to remove.
+The point is to allow the *one* write nginx genuinely needs and freeze the rest.
